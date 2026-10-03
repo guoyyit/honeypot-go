@@ -68,13 +68,13 @@ func serveHTTP(ctx context.Context, c *Conn, alerter alert.Alerter, fp *fingerpr
 			}
 			// 已读到部分数据但解析失败：记录为一次探测并回 400。
 			if pr.gotData {
-				emitHTTPAlert(source, svc.Name, chunks, fp, alerter)
+				emitHTTPAlert(ctx, c.Recorder(), source, svc.Name, chunks, fp, alerter)
 				return malformedHTTP(ctx, c)
 			}
 			return err
 		}
 
-		emitHTTPAlert(source, svc.Name, chunks, fp, alerter)
+		emitHTTPAlert(ctx, c.Recorder(), source, svc.Name, chunks, fp, alerter)
 		if err := writeHTTPResponse(ctx, c, svc); err != nil {
 			return err
 		}
@@ -84,11 +84,18 @@ func serveHTTP(ctx context.Context, c *Conn, alerter alert.Alerter, fp *fingerpr
 	}
 }
 
-func emitHTTPAlert(source, service string, chunks [][]byte, fp *fingerprint.Matcher, alerter alert.Alerter) {
+// emitHTTPAlert 对当前已捕获的入站内容做指纹匹配：
+// 命中时先把命中规则名写入会话记录（保证“告警已触发则记录必为同一规则名”），
+// 再按规则归类产生告警；未命中时不写指纹，由 finishConn 统一补 unknown:no-match。
+// 指纹记录与 alerter 是否存在无关，任何已捕获内容命中都必须落记录。
+func emitHTTPAlert(ctx context.Context, rec *session.Recorder, source, service string, chunks [][]byte, fp *fingerprint.Matcher, alerter alert.Alerter) {
+	name, hit := fp.Match(string(config.KindHTTP), chunks)
+	if hit {
+		_ = rec.SetFingerprint(ctx, name)
+	}
 	if alerter == nil {
 		return
 	}
-	name, hit := fp.Match(string(config.KindHTTP), chunks)
 	sig := SigHTTPProbe
 	if hit {
 		sig = classifyHTTPSig(name)

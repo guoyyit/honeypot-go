@@ -62,11 +62,31 @@ printf 'hello' | nc 127.0.0.1 19000
 | `dedup.window` | 告警去重滑动窗口（距上次活动时间） |
 | `dedup.keys` | 参与去重键的字段，取值 `source` / `signature` / `service` |
 | `services[].kind` | `http` / `ssh` / `ftp` / `tcp` |
-| `services[].listen` | 监听地址，**必须是回环地址** |
+| `services[].listen` | 监听地址，**必须显式写回环主机**，仅接受下表列出的合法写法 |
 | `services[].banner` | 服务横幅；HTTP 中可覆盖响应体，SSH/FTP 为接入横幅，TCP 为接入即发 |
 | `services[].enabled` | 是否随 `StartAll` 启动 |
 | `services[].behavior.status` / `body` | HTTP 固定响应码与响应体 |
 | `services[].behavior.response` | SSH/TCP 的固定响应；TCP 中填 `echo:` 表示原样回显 |
+
+### 监听地址写法（强制回环）
+
+监听地址在**配置加载阶段**与**运行期创建诱饵时**都会被校验（`config.ValidateListen`），任何非回环写法都会被明确拒绝；拒绝发生在打开监听套接字之前，因此服务启动后不存在任何绑定在非回环地址上的套接字。四类仿真（HTTP/SSH/FTP/TCP）规则相同，配置键与格式保持不变、无需迁移。
+
+合法写法（主机部分必填，仅限回环）：
+
+- `127.0.0.1:18099`
+- `localhost:18099`
+- `[::1]:18099`
+
+被拒绝的写法及报错要点：
+
+| 写法 | 拒绝原因 |
+| --- | --- |
+| `:18099` | 省略主机部分，会绑定到所有网卡；报错提示需显式加 `127.0.0.1`/`localhost`/`[::1]` 前缀 |
+| `0.0.0.0:18099`、`192.168.x.x:18099`、其它具体网卡 IP | 非回环地址 |
+| `[::]:18099` | IPv6 通配地址，等价于监听所有网卡 |
+| `example.com:18099` | 主机名不是回环别名（仅 `localhost` 受支持） |
+| `18099` | 不是 `host:port` 形式 |
 
 ## 会话记录格式
 
@@ -74,10 +94,17 @@ printf 'hello' | nc 127.0.0.1 19000
 
 1. `meta`：会话元数据（ID、服务、类型、监听、来源、世代、开始时间）。
 2. 若干 `event`：`seq` 单调递增，`dir` 为 `in`/`out`/`system`，载荷放 `data_b64`（Base64），截断/限流等写 `note`。
-3. 可选 `fingerprint`：命中规则名或 `unknown:no-match`。
+3. 可选 `fingerprint`：命中时为命中规则名；会话收尾时仍无任何命中则写未命中标记 `unknown:no-match`。
 4. `end`：结束时间与确定的关闭原因。
 
 每次追加写入都执行 `fsync`，因此即使进程被杀或客户端中途断开，已捕获内容也完整可读。`List` 只返回会话元数据（内存有界），需要载荷时按 ID 调用 `Get` 从磁盘读取。
+
+### 指纹写入时机与告警的对应关系
+
+- 处理器对**当前会话已捕获的全部入站内容**做指纹匹配；一旦命中，立即把命中规则名通过 `fingerprint` 记录追加到该会话文件，随后才依据命中结果归类并产生告警。
+- 因此“指纹告警已触发”与“会话记录写入同一命中规则名”是同一次匹配的两个结果，二者可通过会话的 `source`（来源地址）与 `service`（诱饵名）相互核验，不会出现“告警已触发而记录仍是未命中”的不一致状态。
+- 会话中任何时刻已捕获内容命中指纹，记录都会反映命中结果（指纹记录首次写入生效，取该会话最早命中的规则名）。
+- 未命中任何规则的会话在收尾时统一写入可区分标记 `unknown:no-match`，且不会产生扫描器类告警（如 `http:scanner`）；普通行为告警（如 `http:request`）与指纹无关，照常产生。
 
 ### 关闭原因（确定语义）
 
@@ -117,6 +144,45 @@ printf 'hello' | nc 127.0.0.1 19000
 
 未命中时会话指纹字段统一为 `unknown:no-match`。
 
+## 问题复现与验证命令
+
+以下命令均可在本地直接复现，预期输出给出关键判定点。
+
+### 指纹告警与会话记录一致性（nikto 场景）
+
+```bash
+# 启动服务（默认 HTTP 监听 127.0.0.1:18080）
+go run ./cmd/honeypot -data /tmp/hp-data
+
+# 另开终端，用带 nikto 特征的 UA 请求
+curl -s -H 'User-Agent: Nikto/2.1.6' http://127.0.0.1:18080/
+
+# 查看该会话记录（找到最新的 jsonl）
+grep -h '"record":"fingerprint"' /tmp/hp-data/sessions/*.jsonl | tail -1
+grep -h '"signature"' /tmp/hp-data/alerts.jsonl | tail -1
+```
+
+预期：
+
+- 会话文件中指纹记录为 `{"record":"fingerprint","fingerprint":"nikto-scanner",...}`，而不是 `unknown:no-match`；
+- `alerts.jsonl` 中存在一条 `"signature":"http:scanner"` 告警，且其 `source`/`service` 与该会话 meta 中的 `source`/`service` 完全一致；
+- 对照：`curl -s -H 'User-Agent: my-client' http://127.0.0.1:18080/` 产生的会话指纹为 `unknown:no-match`，且只有 `http:request` 告警、没有 `http:scanner`。
+
+### 缺省主机监听被拒绝
+
+```bash
+# 构造一份只写端口、省略主机的配置
+cat >/tmp/bad.json <<'JSON'
+{ "data_dir": "/tmp/hp-bad",
+  "services": [ {"name":"wild","kind":"http","listen":":18099","enabled":true} ] }
+JSON
+go run ./cmd/honeypot -config /tmp/bad.json
+```
+
+预期：进程在配置加载阶段直接退出，错误信息类似
+`load config: service "wild": listen ":18099" omits the host part and would bind all interfaces; prefix it with a loopback host such as 127.0.0.1, localhost or [::1]`；
+此时尚未打开任何监听，`lsof -nP -iTCP:18099 -sTCP:LISTEN` 无输出。把 `listen` 改为 `127.0.0.1:18099`、`localhost:18099` 或 `[::1]:18099` 后即正常启动；启动后 `lsof` 只能看到回环地址上的监听套接字。
+
 ## 生命周期语义
 
 - **Pause**：关闭监听，不再接受新连接；在途会话不受影响。
@@ -137,7 +203,7 @@ printf 'hello' | nc 127.0.0.1 19000
 go test ./... -race -count=1
 ```
 
-覆盖场景：四类仿真并存、指纹命中/未命中/顺序匹配/类型隔离、告警窗口去重与可配置键及重启恢复、暂停/恢复/轮换/退役、重启后会话与告警恢复、并发上限/单会话字节上限/全局记录上限、慢速连接不阻塞他人、中途断开内容完整落盘。
+覆盖场景：四类仿真并存、指纹命中/未命中/顺序匹配/类型隔离、指纹命中时告警规则名与会话记录一致（含 HTTP nikto 场景，不会“告警已触发而记录仍为未命中”）、多连接并发指纹识别不串线/不丢配（`-race`）、告警窗口去重与可配置键及重启恢复、暂停/恢复/轮换/退役、完整停止后以全新实例重启的多周期恢复（历史会话/载荷/指纹/告警完整、恢复后新写入可用）、并发上限/单会话字节上限/全局记录上限、慢速连接不阻塞他人、中途断开内容完整落盘、监听地址强制回环（缺省主机/非回环在配置加载与运行期创建时均被拒绝、监听套接字只绑定回环）。
 
 ## 安全说明
 

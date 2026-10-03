@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -232,21 +233,49 @@ func (c Config) Validate() error {
 		if !validKinds[svc.Kind] {
 			return fmt.Errorf("service %q has unsupported kind %q", svc.Name, svc.Kind)
 		}
-		if svc.Listen == "" {
-			return fmt.Errorf("service %q missing listen address", svc.Name)
-		}
-		if !strings.Contains(svc.Listen, ":") {
-			return fmt.Errorf("service %q listen must be host:port", svc.Name)
-		}
-		host := svc.Listen[:strings.LastIndex(svc.Listen, ":")]
-		if host != "" && host != "127.0.0.1" && host != "localhost" && host != "[::1]" {
-			return fmt.Errorf("service %q listen must be on loopback, got %q", svc.Name, host)
+		if err := ValidateListen(svc.Listen); err != nil {
+			return fmt.Errorf("service %q: %w", svc.Name, err)
 		}
 		key := svc.Listen
 		if listeners[key] {
 			return fmt.Errorf("duplicate listen address %q", svc.Listen)
 		}
 		listeners[key] = true
+	}
+	return nil
+}
+
+// loopbackHosts 是显式允许的监听主机写法（仅回环）。
+var loopbackHosts = map[string]bool{
+	"127.0.0.1": true,
+	"localhost": true,
+	"::1":       true, // net.SplitHostPort("[::1]:p") 解析出的主机即 ::1
+}
+
+// ValidateListen 校验单个监听地址：
+//   - 必须是 host:port（或 [host]:port）形式且带端口；
+//   - 主机部分不得省略（如 ":18099" 会绑定到所有网卡，必须拒绝）；
+//   - 主机必须是回环地址：127.0.0.1、localhost 或 [::1]。
+//
+// 该函数供配置加载与运行期创建诱饵共用，保证任何监听都限定在回环地址。
+func ValidateListen(listen string) error {
+	if listen == "" {
+		return errors.New("missing listen address, expected host:port on loopback")
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("listen must be host:port, got %q: %v", listen, err)
+	}
+	if host == "" {
+		return fmt.Errorf("listen %q omits the host part and would bind all interfaces; "+
+			"prefix it with a loopback host such as 127.0.0.1, localhost or [::1]", listen)
+	}
+	if port == "" {
+		return fmt.Errorf("listen %q is missing a port", listen)
+	}
+	normalized := strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if !loopbackHosts[normalized] {
+		return fmt.Errorf("listen must be on loopback (127.0.0.1/localhost/[::1]), got host %q", host)
 	}
 	return nil
 }

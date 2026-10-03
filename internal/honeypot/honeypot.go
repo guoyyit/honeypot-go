@@ -221,6 +221,10 @@ func (m *Manager) Create(cfg config.ServiceConfig) error {
 }
 
 func (m *Manager) startAccepting(d *decoy) error {
+	// 打开任何套接字之前强制回环校验：配置加载与运行期创建两条入口都覆盖。
+	if err := config.ValidateListen(d.cfg.Listen); err != nil {
+		return fmt.Errorf("refuse to listen for decoy %q: %w", d.cfg.Name, err)
+	}
 	ln, err := net.Listen("tcp", d.cfg.Listen)
 	if err != nil {
 		return err
@@ -235,6 +239,35 @@ func (m *Manager) startAccepting(d *decoy) error {
 	m.wg.Add(1)
 	go m.acceptLoop(d, ln, stopCh)
 	return nil
+}
+
+// Listeners 返回每个活动诱饵当前实际绑定的监听地址（host:port），
+// 暂停/退役（无监听）的诱饵不包含在结果中。便于核验套接字绑定位置。
+func (m *Manager) Listeners() map[string]string {
+	m.mu.Lock()
+	names := make([]string, 0, len(m.decoys))
+	for name := range m.decoys {
+		names = append(names, name)
+	}
+	m.mu.Unlock()
+
+	out := make(map[string]string)
+	for _, name := range names {
+		m.mu.Lock()
+		d := m.decoys[name]
+		m.mu.Unlock()
+		d.mu.Lock()
+		ln := d.listener
+		d.mu.Unlock()
+		if ln != nil {
+			if ta, ok := ln.Addr().(*net.TCPAddr); ok {
+				out[name] = ta.String()
+			} else {
+				out[name] = ln.Addr().String()
+			}
+		}
+	}
+	return out
 }
 
 func (m *Manager) acceptLoop(d *decoy, ln net.Listener, stopCh <-chan struct{}) {
