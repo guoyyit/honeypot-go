@@ -13,6 +13,34 @@ import (
 	"github.com/guoyyit/honeypot-go/internal/session"
 )
 
+// observeFingerprint 在已捕获内容命中指纹时：
+//  1. 首次命中把规则名写入会话记录（后续命中不覆盖，保证会话指纹稳定）；
+//  2. 发出一条携带同一会话指纹规则名的告警，使告警与会话记录可相互核验。
+//
+// 未命中时不写入会话指纹、不发出告警（由 finishConn 补写未命中标记）。
+// 返回是否命中。
+func observeFingerprint(
+	ctx context.Context,
+	rec *session.Recorder,
+	alerter alert.Alerter,
+	source, service string,
+	fp *fingerprint.Matcher,
+	kind string,
+	chunks [][]byte,
+	sig string,
+) bool {
+	name, ok := fp.Match(kind, chunks)
+	if !ok {
+		return false
+	}
+	_ = rec.SetFingerprint(ctx, name)
+	fpName := rec.Fingerprint()
+	if alerter != nil {
+		alerter.Observe(source, sig, service, fpName)
+	}
+	return true
+}
+
 // 关闭原因使用固定字符串，保证超限时行为确定、可读。
 const (
 	ReasonClientClosed = "client_closed"

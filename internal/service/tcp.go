@@ -42,7 +42,7 @@ func serveTCP(ctx context.Context, c *Conn, alerter alert.Alerter, fp *fingerpri
 		}
 	}
 	if alerter != nil {
-		alerter.Observe(c.RemoteAddr(), SigTCPConnect, svc.Name)
+		alerter.Observe(c.RemoteAddr(), SigTCPConnect, svc.Name, "")
 	}
 
 	var chunks [][]byte
@@ -73,12 +73,8 @@ func serveTCP(ctx context.Context, c *Conn, alerter alert.Alerter, fp *fingerpri
 		}
 
 		if !fpWritten {
-			if name, ok := fp.Match(string(config.KindTCP), chunks); ok {
-				_ = c.Recorder().SetFingerprint(ctx, name)
+			if observeFingerprint(ctx, c.Recorder(), alerter, c.RemoteAddr(), svc.Name, fp, string(config.KindTCP), chunks, SigTCPProbe) {
 				fpWritten = true
-				if alerter != nil {
-					alerter.Observe(c.RemoteAddr(), SigTCPProbe, svc.Name)
-				}
 			}
 		}
 

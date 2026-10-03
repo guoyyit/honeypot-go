@@ -48,7 +48,7 @@ func serveFTP(ctx context.Context, c *Conn, alerter alert.Alerter, fp *fingerpri
 		return err
 	}
 	if alerter != nil {
-		alerter.Observe(c.RemoteAddr(), SigFTPConnect, svc.Name)
+		alerter.Observe(c.RemoteAddr(), SigFTPConnect, svc.Name, "")
 	}
 
 	var chunks [][]byte
@@ -93,15 +93,11 @@ func serveFTP(ctx context.Context, c *Conn, alerter alert.Alerter, fp *fingerpri
 
 			reply, done, sig := ftpReply(line)
 			if sig != "" && alerter != nil {
-				alerter.Observe(c.RemoteAddr(), sig, svc.Name)
+				alerter.Observe(c.RemoteAddr(), sig, svc.Name, "")
 			}
 			if !fpWritten {
-				if name, ok := fp.Match(string(config.KindFTP), chunks); ok {
-					_ = c.Recorder().SetFingerprint(ctx, name)
+				if observeFingerprint(ctx, c.Recorder(), alerter, c.RemoteAddr(), svc.Name, fp, string(config.KindFTP), chunks, SigFTPScan) {
 					fpWritten = true
-					if alerter != nil {
-						alerter.Observe(c.RemoteAddr(), SigFTPScan, svc.Name)
-					}
 				}
 			}
 			if err := c.Write(ctx, []byte(reply)); err != nil {

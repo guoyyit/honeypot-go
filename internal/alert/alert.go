@@ -17,6 +17,9 @@ type Alert struct {
 	Source    string    `json:"source"`
 	Signature string    `json:"signature"`
 	Service   string    `json:"service"`
+	// Fingerprint 是触发本次告警的指纹规则名；非指纹命中触发的告警为空串。
+	// 该字段与对应会话记录中的 fingerprint 字段一致，用于告警与会话记录相互核验。
+	Fingerprint string    `json:"fingerprint,omitempty"`
 	FirstSeen time.Time `json:"first_seen"`
 	LastSeen  time.Time `json:"last_seen"`
 	Count     int       `json:"count"`
@@ -24,7 +27,7 @@ type Alert struct {
 
 // Alerter 是仿真处理器使用的告警接口。
 type Alerter interface {
-	Observe(source, signature, service string) (emitted bool, al *Alert)
+	Observe(source, signature, service, fingerprint string) (emitted bool, al *Alert)
 }
 
 // Manager 负责按窗口与匹配规则对告警去重，并持久化告警。
@@ -144,10 +147,10 @@ func (m *Manager) appendToDisk(al *Alert) error {
 	return f.Sync()
 }
 
-// Observe 记录一次行为。
+// Observe 记录一次行为。fingerprint 为触发本次告警的指纹规则名（非指纹命中时传空串）。
 // 去重语义：同一去重键在上次发出告警后的 window 时间内再次出现，仅累加计数与
 // LastSeen，不再发出告警（emitted=false）；窗口外再次出现则重新发出一条告警。
-func (m *Manager) Observe(source, signature, service string) (emitted bool, al *Alert) {
+func (m *Manager) Observe(source, signature, service, fingerprint string) (emitted bool, al *Alert) {
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -162,13 +165,14 @@ func (m *Manager) Observe(source, signature, service string) (emitted bool, al *
 	}
 
 	al = &Alert{
-		Key:       key,
-		Source:    source,
-		Signature: signature,
-		Service:   service,
-		FirstSeen: now,
-		LastSeen:  now,
-		Count:     1,
+		Key:         key,
+		Source:      source,
+		Signature:   signature,
+		Service:     service,
+		Fingerprint: fingerprint,
+		FirstSeen:   now,
+		LastSeen:    now,
+		Count:       1,
 	}
 	if !ok {
 		m.states[key] = al

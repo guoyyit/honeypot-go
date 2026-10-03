@@ -70,16 +70,18 @@ func serveSSH(ctx context.Context, c *Conn, alerter alert.Alerter, fp *fingerpri
 		name = fingerprint.Miss
 	}
 	_ = c.Recorder().SetFingerprint(ctx, name)
+	fpName := c.Recorder().Fingerprint()
 	if alerter != nil {
-		alerter.Observe(source, sig, svc.Name)
+		alerter.Observe(source, sig, svc.Name, fpName)
 	}
 
 	// 读取一段紧随其后的数据（很多工具 banner 后立刻发包）用于二次指纹。
 	if extra, rerr := readOnceCtx(ctx, c, &chunks); rerr == nil && len(extra) > 0 {
 		if n2, ok := fp.Match(string(config.KindSSH), chunks); ok {
 			_ = c.Recorder().SetFingerprint(ctx, n2)
+			fpName2 := c.Recorder().Fingerprint()
 			if alerter != nil {
-				alerter.Observe(source, SigSSHProbe, svc.Name)
+				alerter.Observe(source, SigSSHProbe, svc.Name, fpName2)
 			}
 		}
 	}

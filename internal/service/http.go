@@ -68,13 +68,13 @@ func serveHTTP(ctx context.Context, c *Conn, alerter alert.Alerter, fp *fingerpr
 			}
 			// 已读到部分数据但解析失败：记录为一次探测并回 400。
 			if pr.gotData {
-				emitHTTPAlert(source, svc.Name, chunks, fp, alerter)
+				emitHTTPAlert(ctx, c.Recorder(), source, svc.Name, chunks, fp, alerter)
 				return malformedHTTP(ctx, c)
 			}
 			return err
 		}
 
-		emitHTTPAlert(source, svc.Name, chunks, fp, alerter)
+		emitHTTPAlert(ctx, c.Recorder(), source, svc.Name, chunks, fp, alerter)
 		if err := writeHTTPResponse(ctx, c, svc); err != nil {
 			return err
 		}
@@ -84,16 +84,21 @@ func serveHTTP(ctx context.Context, c *Conn, alerter alert.Alerter, fp *fingerpr
 	}
 }
 
-func emitHTTPAlert(source, service string, chunks [][]byte, fp *fingerprint.Matcher, alerter alert.Alerter) {
+func emitHTTPAlert(ctx context.Context, rec *session.Recorder, source, service string, chunks [][]byte, fp *fingerprint.Matcher, alerter alert.Alerter) {
 	if alerter == nil {
 		return
 	}
 	name, hit := fp.Match(string(config.KindHTTP), chunks)
 	sig := SigHTTPProbe
+	fpName := ""
 	if hit {
 		sig = classifyHTTPSig(name)
+		// 命中指纹：写入会话记录并发出携带同一规则名的告警，
+		// 保证告警与会话记录可相互核验。
+		_ = rec.SetFingerprint(ctx, name)
+		fpName = rec.Fingerprint()
 	}
-	alerter.Observe(source, sig, service)
+	alerter.Observe(source, sig, service, fpName)
 }
 
 func classifyHTTPSig(name string) string {

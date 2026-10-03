@@ -433,6 +433,7 @@ type Recorder struct {
 	seen       atomic.Int64
 	mu         sync.Mutex
 	fpSet      bool
+	fp         string
 	closed     bool
 	limitNoted bool
 }
@@ -507,7 +508,8 @@ func (r *Recorder) System(ctx context.Context, note string) error {
 	return r.Log(ctx, DirSystem, nil, note)
 }
 
-// SetFingerprint 记录指纹命中结果，仅首次写入生效。
+// SetFingerprint 记录指纹命中结果，仅首次写入生效（后续命中不覆盖，
+// 保证会话指纹与因指纹命中而产生的告警可相互核验）。
 func (r *Recorder) SetFingerprint(_ context.Context, fp string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -515,7 +517,15 @@ func (r *Recorder) SetFingerprint(_ context.Context, fp string) error {
 		return nil
 	}
 	r.fpSet = true
+	r.fp = fp
 	return r.store.SetFingerprint(r.id, fp)
+}
+
+// Fingerprint 返回本会话已写入的指纹结果；未写入时返回空串。
+func (r *Recorder) Fingerprint() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.fp
 }
 
 // HasFingerprint 报告本会话是否已写入过指纹结果。

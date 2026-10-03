@@ -11,13 +11,13 @@ func TestDedupWindow(t *testing.T) {
 	m := NewManager(time.Minute, []string{"source", "signature"}, "")
 	m.now = func() time.Time { return now }
 
-	emitted, al := m.Observe("10.0.0.1:1", "http:scanner", "web")
+	emitted, al := m.Observe("10.0.0.1:1", "http:scanner", "web", "")
 	if !emitted || al.Count != 1 {
 		t.Fatalf("first observe must emit, got emitted=%v count=%d", emitted, al.Count)
 	}
 	// 窗口内同源同行为：不再发出
 	now = now.Add(30 * time.Second)
-	emitted, al = m.Observe("10.0.0.1:1", "http:scanner", "web")
+	emitted, al = m.Observe("10.0.0.1:1", "http:scanner", "web", "")
 	if emitted {
 		t.Fatal("second observe within window must not emit")
 	}
@@ -25,18 +25,18 @@ func TestDedupWindow(t *testing.T) {
 		t.Fatalf("count should accumulate to 2, got %d", al.Count)
 	}
 	// 不同签名：发出
-	emitted, _ = m.Observe("10.0.0.1:1", "http:exploit", "web")
+	emitted, _ = m.Observe("10.0.0.1:1", "http:exploit", "web", "")
 	if !emitted {
 		t.Fatal("different signature must emit")
 	}
 	// 不同来源：发出
-	emitted, _ = m.Observe("10.0.0.2:2", "http:scanner", "web")
+	emitted, _ = m.Observe("10.0.0.2:2", "http:scanner", "web", "")
 	if !emitted {
 		t.Fatal("different source must emit")
 	}
 	// 窗口过后：再次发出，计数重置
 	now = now.Add(61 * time.Second)
-	emitted, al = m.Observe("10.0.0.1:1", "http:scanner", "web")
+	emitted, al = m.Observe("10.0.0.1:1", "http:scanner", "web", "")
 	if !emitted {
 		t.Fatal("observe after window must emit again")
 	}
@@ -54,11 +54,11 @@ func TestDedupKeysConfigurable(t *testing.T) {
 	m := NewManager(time.Minute, []string{"signature"}, "")
 	m.now = func() time.Time { return now }
 
-	emitted, _ := m.Observe("10.0.0.1:1", "sig-x", "svc-a")
+	emitted, _ := m.Observe("10.0.0.1:1", "sig-x", "svc-a", "")
 	if !emitted {
 		t.Fatal("first must emit")
 	}
-	emitted, al := m.Observe("10.0.0.9:9", "sig-x", "svc-b")
+	emitted, al := m.Observe("10.0.0.9:9", "sig-x", "svc-b", "")
 	if emitted {
 		t.Fatal("same signature with different source must be deduped when keys=[signature]")
 	}
@@ -72,8 +72,8 @@ func TestDedupPersistence(t *testing.T) {
 	now := time.Unix(3000, 0)
 	m1 := NewManager(5*time.Minute, []string{"source", "signature"}, path)
 	m1.now = func() time.Time { return now }
-	m1.Observe("1.2.3.4:5", "ftp:login-attempt", "ftp")
-	m1.Observe("1.2.3.4:5", "ftp:login-attempt", "ftp")
+	m1.Observe("1.2.3.4:5", "ftp:login-attempt", "ftp", "")
+	m1.Observe("1.2.3.4:5", "ftp:login-attempt", "ftp", "")
 
 	m2 := NewManager(5*time.Minute, []string{"source", "signature"}, path)
 	als := m2.Alerts()

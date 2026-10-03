@@ -71,6 +71,12 @@ func TestValidateErrors(t *testing.T) {
 	if err := bad(func(c *Config) { c.Services[0].Listen = "0.0.0.0:80" }); err == nil {
 		t.Fatal("non-loopback listen must fail")
 	}
+	if err := bad(func(c *Config) { c.Services[0].Listen = ":18099" }); err == nil {
+		t.Fatal("empty-host listen (e.g. :18099) must fail because it binds to all interfaces")
+	}
+	if err := bad(func(c *Config) { c.Services[0].Listen = "192.168.1.1:80" }); err == nil {
+		t.Fatal("non-loopback host must fail")
+	}
 	if err := bad(func(c *Config) { c.Services[1].Listen = c.Services[0].Listen }); err == nil {
 		t.Fatal("duplicate listen must fail")
 	}
@@ -83,5 +89,20 @@ func TestValidateErrors(t *testing.T) {
 	good := Default()
 	if err := good.Validate(); err != nil {
 		t.Fatalf("defaults must be valid: %v", err)
+	}
+}
+
+func TestValidateListen(t *testing.T) {
+	good := []string{"127.0.0.1:18080", "localhost:18080", "[::1]:18080"}
+	for _, a := range good {
+		if err := ValidateListen(a); err != nil {
+			t.Fatalf("%q should be valid: %v", a, err)
+		}
+	}
+	bad := []string{":18099", "0.0.0.0:80", "192.168.1.1:80", "18080", "127.0.0.1"}
+	for _, a := range bad {
+		if err := ValidateListen(a); err == nil {
+			t.Fatalf("%q should be rejected", a)
+		}
 	}
 }

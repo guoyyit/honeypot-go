@@ -62,7 +62,7 @@ printf 'hello' | nc 127.0.0.1 19000
 | `dedup.window` | 告警去重滑动窗口（距上次活动时间） |
 | `dedup.keys` | 参与去重键的字段，取值 `source` / `signature` / `service` |
 | `services[].kind` | `http` / `ssh` / `ftp` / `tcp` |
-| `services[].listen` | 监听地址，**必须是回环地址** |
+| `services[].listen` | 监听地址，**必须是回环地址的 `host:port` 形式**。合法：`127.0.0.1:18080`、`localhost:18080`、`[::1]:18080`；被拒绝：`:18099`（缺主机，会绑定所有网卡）、`0.0.0.0:18099`、`192.168.1.10:18099` |
 | `services[].banner` | 服务横幅；HTTP 中可覆盖响应体，SSH/FTP 为接入横幅，TCP 为接入即发 |
 | `services[].enabled` | 是否随 `StartAll` 启动 |
 | `services[].behavior.status` / `body` | HTTP 固定响应码与响应体 |
@@ -117,6 +117,10 @@ printf 'hello' | nc 127.0.0.1 19000
 
 未命中时会话指纹字段统一为 `unknown:no-match`。
 
+**指纹写入时机**：仿真处理器在每块入站数据落盘后做一次匹配。一旦命中，立即把规则名写入会话记录（`fingerprint` 行），并发出一条携带同一规则名的告警（告警 JSON 中的 `fingerprint` 字段）。同一会话后续再次命中不覆盖已写入的规则名，保证会话指纹稳定。未命中时不写指纹行，由收尾逻辑补写 `unknown:no-match`。
+
+**告警与会话记录的对应关系**：因指纹命中而产生的告警，其 `fingerprint` 字段与对应会话记录的 `fingerprint` 字段完全一致，且 `source` + `service` 可定位到唯一会话。据此可相互核验：由告警查到会话，或由会话查到告警。非指纹命中触发的告警（如 `tcp:connect`、`ftp:connect`、`ssh:banner`）`fingerprint` 字段为空。
+
 ## 生命周期语义
 
 - **Pause**：关闭监听，不再接受新连接；在途会话不受影响。
@@ -138,6 +142,99 @@ go test ./... -race -count=1
 ```
 
 覆盖场景：四类仿真并存、指纹命中/未命中/顺序匹配/类型隔离、告警窗口去重与可配置键及重启恢复、暂停/恢复/轮换/退役、重启后会话与告警恢复、并发上限/单会话字节上限/全局记录上限、慢速连接不阻塞他人、中途断开内容完整落盘。
+
+## 本地验证
+
+以下命令可在本地复现并验证上述两类问题的修复。
+
+### 监听地址约束
+
+缺省主机的配置必须在加载阶段被拒绝，且服务启动前不打开任何监听：
+
+```bash
+# 准备一份 listen 缺主机的配置
+cat > /tmp/bad-listen.json <<'EOF'
+{
+  "data_dir": "/tmp/hp-data",
+  "services": [
+    {"name":"web","kind":"http","listen":":18099","enabled":true,"behavior":{"status":200,"body":"OK"}}
+  ]
+}
+EOF
+
+# 加载必须失败，且不产生监听套接字
+go run ./cmd/honeypot -config /tmp/bad-listen.json
+# 预期输出（关键行）：
+#   load config: service "web": listen ":18099" missing host; must be a loopback address (127.0.0.1, localhost, or [::1]), not ":18099"
+#   exit status 1
+
+# 验证没有绑定在非回环地址上的监听套接字
+lsof -nP -iTCP:18099 -sTCP:LISTEN
+# 预期：无输出（没有监听套接字残留）
+```
+
+合法回环配置（`127.0.0.1` / `localhost` / `[::1]`）必须继续可用：
+
+```bash
+cat > /tmp/good-listen.json <<'EOF'
+{
+  "data_dir": "/tmp/hp-data",
+  "services": [
+    {"name":"web","kind":"http","listen":"127.0.0.1:18099","enabled":true,"behavior":{"status":200,"body":"OK"}}
+  ]
+}
+EOF
+go run ./cmd/honeypot -config /tmp/good-listen.json &
+sleep 1
+curl -s http://127.0.0.1:18099/
+# 预期输出：OK
+kill %1
+```
+
+### 指纹命中一致性
+
+指纹命中后，会话记录与告警必须写入同一规则名：
+
+```bash
+# 启动服务（使用默认配置）
+go run ./cmd/honeypot -data /tmp/hp-data &
+sleep 1
+
+# 发送 nikto 特征的 User-Agent
+curl -s -A "nikto/2.1.6" http://127.0.0.1:18080/
+# 预期输出：OK
+
+# 查看会话记录中的指纹字段
+for f in /tmp/hp-data/sessions/*.jsonl; do
+  echo "== $f =="
+  grep -o '"fingerprint":"[^"]*"' "$f" || echo "(no fingerprint line)"
+done
+# 预期：命中的会话输出 "fingerprint":"nikto-scanner"
+
+# 查看告警中的指纹字段
+cat /tmp/hp-data/alerts.jsonl
+# 预期：命中的告警包含 "fingerprint":"nikto-scanner"，
+#       且其 source/service 与会话记录一致
+
+kill %1
+```
+
+未命中指纹的会话仍保留可区分的未命中标记：
+
+```bash
+curl -s -A "my-custom-browser/1.0" http://127.0.0.1:18080/
+# 预期输出：OK
+# 该会话的 fingerprint 行为 "fingerprint":"unknown:no-match"，
+# 对应告警的 fingerprint 字段为空。
+```
+
+### 自动化测试
+
+```bash
+go test ./... -race -count=1
+```
+
+覆盖场景：指纹命中/未命中一致性、监听地址约束（配置加载与运行期创建）、并发指纹识别无串线、重启恢复（真实停止后重新启动）、四类仿真并存、资源边界、慢速连接、中途断开内容完整落盘。
 
 ## 安全说明
 

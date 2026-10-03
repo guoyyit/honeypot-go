@@ -197,6 +197,9 @@ func (m *Manager) Create(cfg config.ServiceConfig) error {
 	if !config.ValidKind(cfg.Kind) {
 		return fmt.Errorf("unsupported kind %q", cfg.Kind)
 	}
+	if err := config.ValidateListen(cfg.Listen); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	if _, ok := m.decoys[cfg.Name]; ok {
 		m.mu.Unlock()
@@ -225,6 +228,12 @@ func (m *Manager) startAccepting(d *decoy) error {
 	if err != nil {
 		return err
 	}
+	// 防御纵深：配置校验之外，再确认实际绑定地址确实是回环地址，
+	// 杜绝任何非回环监听套接字残留。
+	if err := ensureLoopback(ln.Addr()); err != nil {
+		_ = ln.Close()
+		return err
+	}
 	d.mu.Lock()
 	d.listener = ln
 	d.stopCh = make(chan struct{})
@@ -234,6 +243,18 @@ func (m *Manager) startAccepting(d *decoy) error {
 
 	m.wg.Add(1)
 	go m.acceptLoop(d, ln, stopCh)
+	return nil
+}
+
+// ensureLoopback 校验监听套接字的实际绑定地址是回环地址。
+func ensureLoopback(addr net.Addr) error {
+	tcpAddr, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return fmt.Errorf("unexpected listener address type %T", addr)
+	}
+	if !tcpAddr.IP.IsLoopback() {
+		return fmt.Errorf("listener bound to non-loopback address %s; only loopback is allowed", addr.String())
+	}
 	return nil
 }
 

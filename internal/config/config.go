@@ -235,12 +235,8 @@ func (c Config) Validate() error {
 		if svc.Listen == "" {
 			return fmt.Errorf("service %q missing listen address", svc.Name)
 		}
-		if !strings.Contains(svc.Listen, ":") {
-			return fmt.Errorf("service %q listen must be host:port", svc.Name)
-		}
-		host := svc.Listen[:strings.LastIndex(svc.Listen, ":")]
-		if host != "" && host != "127.0.0.1" && host != "localhost" && host != "[::1]" {
-			return fmt.Errorf("service %q listen must be on loopback, got %q", svc.Name, host)
+		if err := ValidateListen(svc.Listen); err != nil {
+			return fmt.Errorf("service %q: %w", svc.Name, err)
 		}
 		key := svc.Listen
 		if listeners[key] {
@@ -249,4 +245,23 @@ func (c Config) Validate() error {
 		listeners[key] = true
 	}
 	return nil
+}
+
+// ValidateListen 校验监听地址必须是回环地址的 host:port 形式。
+// 缺省主机（如 ":18099"）会被拒绝，因为 net.Listen 会将其绑定到所有网卡，
+// 违背蜜罐仅监听回环地址的约束。合法主机为 127.0.0.1 / localhost / [::1]。
+func ValidateListen(addr string) error {
+	if !strings.Contains(addr, ":") {
+		return fmt.Errorf("listen must be host:port, got %q", addr)
+	}
+	host := addr[:strings.LastIndex(addr, ":")]
+	if host == "" {
+		return fmt.Errorf("listen %q missing host; must be a loopback address (127.0.0.1, localhost, or [::1]), not %q", addr, addr)
+	}
+	switch host {
+	case "127.0.0.1", "localhost", "[::1]":
+		return nil
+	default:
+		return fmt.Errorf("listen must be on loopback (127.0.0.1, localhost, or [::1]), got %q", host)
+	}
 }
